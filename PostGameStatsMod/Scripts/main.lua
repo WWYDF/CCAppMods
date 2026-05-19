@@ -1,3 +1,12 @@
+
+local ModName = "PostGameStatsMod"
+local ModVersion = "2.0.0"
+
+print(string.format("\n=== %s v%s Loaded ===\n", ModName, ModVersion))
+
+local statsCollected = false
+local hookRegistered = false
+
 local function writeStats(players)
     local json = "[\n"
     for i, p in ipairs(players) do
@@ -23,22 +32,29 @@ local function writeStats(players)
     end
 end
 
-RegisterHook("/Game/Prometheus/UI/OutOfGame/EndOfGame/WBP_Menu_EndOfGame.WBP_Menu_EndOfGame_C:BndEvt__WBP_Menu_EndOfGame_Tabs_K2Node_ComponentBoundEvent_2_OnActiveHeaderChanged__DelegateSignature", function(self, tabId)
-    local tab = tabId:get():ToString()
-    if tab ~= "stats" then return end
-    print("[PGSM] Stats tab opened!")
-
+local function collectStats()
+    print(string.format("\n[PGSM] Attempting to collect stats..."))
+    
     local rows = FindAllOf("WBP_EndOfGame_PlayerStatRow_C")
-    if not rows then print("[PGSM] No rows found") return end
-
+    
+    if not rows or #rows == 0 then
+        print("[PGSM] No rows found")
+        return false
+    end
+    
+    print(string.format("[PGSM] Found %d stat rows", #rows))
+    
     local players = {}
     for _, row in ipairs(rows) do
         local ok, player = pcall(function()
-            if not row.Redirects:IsValid() then return nil end
+            if not row.Redirects or not row.Redirects:IsValid() then return nil end
+            
             local name = row.PlayerName:GetText():ToString()
             if name == "PlayerName" then return nil end
             name = name:gsub("<[^>]+>", "")
+            
             local goals, assists = row.GoalsPlusAssists:GetText():ToString():match("(%d+)%+(%d+)")
+            
             return {
                 name = name,
                 goals = goals or "0",
@@ -51,14 +67,93 @@ RegisterHook("/Game/Prometheus/UI/OutOfGame/EndOfGame/WBP_Menu_EndOfGame.WBP_Men
                 orbs = row.Orbs:GetText():ToString(),
             }
         end)
+        
         if ok and player then
+            print(string.format("  > %s", player.name))
             table.insert(players, player)
         end
     end
-
+    
     if #players > 0 then
+        print(string.format("\n[PGSM] Successfully collected %d players!", #players))
         writeStats(players)
+        statsCollected = true
+        return true
     else
         print("[PGSM] No valid players found")
+        return false
     end
-end)
+end
+
+-- Try to register MatchSummary hook (with polling)
+print("Attempting to register MatchSummary hook...")
+
+local function tryRegisterHook()
+    if hookRegistered then return true end
+    
+    local success = pcall(function()
+        RegisterHook(
+            "/Game/Prometheus/Blueprints/Core/GameState_Game.GameState_Game_C:MatchSummary",
+            function(self, MatchEventLog)
+                print("\n")
+                print("[PGSM] Match Summary Event Called!")
+                print("[PGSM] Will start checking for stats in 10 seconds... (waiting for mvp screen to finish)")
+                print("")
+                
+                statsCollected = false
+                
+                local attempts = 0
+                local maxAttempts = 10
+                
+                local function tryCollect()
+                    attempts = attempts + 1
+                    print(string.format("\n[PGSM] Collection attempt %d/%d", attempts, maxAttempts))
+                    
+                    local success = collectStats()
+                    
+                    if not success and attempts < maxAttempts then
+                        ExecuteWithDelay(10000, tryCollect) -- Try again in 10 seconds
+                    elseif not success then
+                        print("[PGSM] (!) Gave up after max attempts")
+                    end
+                end
+                
+                -- Wait 10 seconds before first attempt
+                ExecuteWithDelay(10000, tryCollect)
+            end
+        )
+    end)
+    
+    if success then
+        hookRegistered = true
+        print("[PGSM] MatchSummary hook registered successfully!")
+        return true
+    else
+        return false
+    end
+end
+
+-- Try immediately
+if not tryRegisterHook() then
+    print("[PGSM] Hook not available yet (not in a match)")
+    print("[PGSM] Will retry every 30 seconds...")
+    
+    -- Retry every 30 seconds
+    local retryCount = 0
+    local function retry()
+        retryCount = retryCount + 1
+        print(string.format("\n[PGSM] Hook registration attempt #%d...", retryCount))
+        
+        if not tryRegisterHook() then
+            ExecuteWithDelay(30000, retry) -- Retry every 30 seconds
+        end
+    end
+    
+    ExecuteWithDelay(30000, retry)
+else
+    print("[PGSM] Hook registered on startup (already in match)")
+end
+
+print("\n--- PostGameStats v2 Active ---")
+print("Outputting to: " .. os.getenv("TEMP") .. "\\PostGameStats.json")
+print("\n")
